@@ -12,8 +12,13 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-      - run: chmod +x gradlew
-      - run: ./gradlew assembleDebug
+      - uses: gradle/actions/setup-gradle@v4
+      - run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 8.7
+          fi
+          chmod +x gradlew
+          ./gradlew assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
