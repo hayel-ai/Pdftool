@@ -2,17 +2,17 @@ package com.example.pdftoolkit
 
 import android.content.ContentValues
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.ImageDecoder
-import android.graphics.Paint
-import android.graphics.Typeface
+import android.graphics.*
+import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextDirectionHeuristics
+import android.text.TextPaint
 import com.tom_roush.pdfbox.io.MemoryUsageSetting
 import com.tom_roush.pdfbox.multipdf.PDFMergerUtility
 import com.tom_roush.pdfbox.pdmodel.PDDocument
@@ -30,9 +30,24 @@ import java.io.OutputStream
 import kotlin.math.max
 import kotlin.math.min
 
+data class WatermarkOptions(
+    val size: Float = 48f,
+    val alpha: Float = 0.35f,
+    val colorInt: Int = Color.GRAY,
+    val angle: Int = 45
+)
+
+data class CreatePdfOptions(
+    val title: String = "",
+    val content: String = "",
+    val fontSize: Float = 14f,
+    val isRtl: Boolean = true
+)
+
 object Storage {
-    private const val PREFS = "pdftoolkit"
+    private const val PREFS = "pdfix_prefs"
     private const val KEY = "out_tree"
+    private const val API_KEY = "convert_api_secret"
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -44,9 +59,14 @@ object Storage {
         e.apply()
     }
 
-    fun where(ctx: Context): String = if (hasTree(ctx)) "المجلد الذي اخترته" else "التنزيلات/PDFToolkit"
+    fun getApiKey(ctx: Context): String = prefs(ctx).getString(API_KEY, "") ?: ""
 
-    /** Saves into the user-chosen folder if set, otherwise Downloads/PDFToolkit. */
+    fun setApiKey(ctx: Context, key: String) {
+        prefs(ctx).edit().putString(API_KEY, key).apply()
+    }
+
+    fun where(ctx: Context): String = if (hasTree(ctx)) "المجلد الذي اخترته" else "التنزيلات/PDFix"
+
     fun save(ctx: Context, name: String, mime: String, write: (OutputStream) -> Unit): String {
         val tree = prefs(ctx).getString(KEY, null)
         if (tree != null) {
@@ -81,7 +101,7 @@ object Storage {
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
             put(MediaStore.Downloads.MIME_TYPE, mime)
-            put(MediaStore.Downloads.RELATIVE_PATH, "Download/PDFToolkit")
+            put(MediaStore.Downloads.RELATIVE_PATH, "Download/PDFix")
             put(MediaStore.Downloads.IS_PENDING, 1)
         }
         val uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
@@ -130,7 +150,6 @@ object PdfOps {
         )
     }
 
-    /** "1,3-5" -> zero-based page indexes. */
     fun parsePages(spec: String, total: Int): List<Int> {
         val result = linkedSetOf<Int>()
         normalize(spec).split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { part ->
@@ -144,7 +163,29 @@ object PdfOps {
         return result.toList()
     }
 
-    fun run(ctx: Context, tool: Tool, files: List<Uri>, pages: String, text: String, angle: Int, quality: Int): String {
+    fun run(
+        ctx: Context,
+        tool: Tool,
+        files: List<Uri>,
+        pages: String,
+        text: String,
+        angle: Int,
+        quality: Int,
+        wmOptions: WatermarkOptions = WatermarkOptions(),
+        createOptions: CreatePdfOptions = CreatePdfOptions(),
+        apiKey: String = "",
+        targetFormat: String = "pdf"
+    ): String {
+        if (tool == Tool.CREATE_PDF) {
+            if (createOptions.content.isBlank() && createOptions.title.isBlank()) {
+                throw IllegalArgumentException("اكتب عنواناً أو نصاً لإنشاء الملف")
+            }
+            val fileName = (createOptions.title.trim().ifEmpty { "PDFix_Document_${System.currentTimeMillis()}" })
+                .replace(Regex("[\\\\/:*?\"<>|]"), "_") + ".pdf"
+            val saved = createNewPdf(ctx, createOptions, fileName)
+            return "✅ تم إنشاء وحفظ الملف في ${Storage.where(ctx)}\n$saved"
+        }
+
         val first = files.first()
         val base = baseName(displayName(ctx, first))
         if (Need.PAGES in tool.needs && pages.isBlank()) throw IllegalArgumentException("أدخل أرقام الصفحات")
@@ -152,26 +193,93 @@ object PdfOps {
             throw IllegalArgumentException("الحقل مطلوب")
 
         val result = when (tool) {
+            Tool.CREATE_PDF -> ""
             Tool.MERGE -> {
                 if (files.size < 2) throw IllegalArgumentException("اختر ملفين على الأقل")
-                merge(ctx, files, "merged.pdf")
+                merge(ctx, files, "PDFix_merged.pdf")
             }
-            Tool.IMAGES -> imagesToPdf(ctx, files, "images.pdf")
+            Tool.IMAGES -> imagesToPdf(ctx, files, "PDFix_images.pdf")
             Tool.SPLIT -> split(ctx, first, pages, base)
             Tool.DELETE -> deletePages(ctx, first, pages, "${base}_edited.pdf")
             Tool.EXTRACT -> extractPages(ctx, first, pages, "${base}_extract.pdf")
             Tool.ROTATE -> rotate(ctx, first, pages, angle, "${base}_rotated.pdf")
-            Tool.WATERMARK -> watermark(ctx, first, text, "${base}_watermark.pdf")
+            Tool.WATERMARK -> watermark(ctx, first, text, wmOptions, "${base}_watermark.pdf")
             Tool.LOCK -> lock(ctx, first, text, "${base}_locked.pdf")
             Tool.UNLOCK -> unlock(ctx, first, text, "${base}_unlocked.pdf")
             Tool.COMPRESS -> compress(ctx, first, quality, "${base}_compressed.pdf")
             Tool.WORD -> Convert.wordToPdf(ctx, first, "$base.pdf")
+            Tool.CLOUD_CONVERT -> Convert.cloudConvert(ctx, first, apiKey, targetFormat, base)
             Tool.PDF_TO_IMAGES -> Convert.pdfToImages(ctx, first, pages, base)
             Tool.REORDER -> reorder(ctx, first, pages, "${base}_reordered.pdf")
             Tool.EXTRACT_IMAGES -> Convert.extractImages(ctx, first, pages, base)
             Tool.PDF_TO_WORD -> Convert.pdfToWord(ctx, first, "$base.docx")
         }
         return "✅ تم الحفظ في ${Storage.where(ctx)}\n$result"
+    }
+
+    private fun createNewPdf(ctx: Context, opts: CreatePdfOptions, out: String): String {
+        val pw = 595
+        val ph = 842
+        val margin = 48
+        val width = pw - 2 * margin
+        val avail = ph - 2 * margin
+
+        val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = opts.fontSize + 6f
+            color = Color.BLACK
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val bodyPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = opts.fontSize
+            color = Color.DKGRAY
+        }
+        val dir = if (opts.isRtl) TextDirectionHeuristics.RTL else TextDirectionHeuristics.LTR
+
+        val fullText = buildString {
+            if (opts.title.isNotBlank()) {
+                append(opts.title.trim())
+                append("\n\n")
+            }
+            append(opts.content)
+        }
+
+        val layout = StaticLayout.Builder.obtain(fullText, 0, fullText.length, bodyPaint, width)
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setLineSpacing(4f, 1.15f)
+            .setIncludePad(false)
+            .setTextDirection(dir)
+            .build()
+
+        return Storage.save(ctx, out, PDF) { os ->
+            val pdf = PdfDocument()
+            try {
+                var line = 0
+                var pageNum = 1
+                while (line < layout.lineCount) {
+                    val top = layout.getLineTop(line)
+                    var end = line
+                    while (end < layout.lineCount && layout.getLineBottom(end) - top <= avail) end++
+                    if (end == line) end = line + 1
+
+                    val page = pdf.startPage(PdfDocument.PageInfo.Builder(pw, ph, pageNum).create())
+                    val c = page.canvas
+                    c.drawColor(Color.WHITE)
+                    c.save()
+                    c.translate(margin.toFloat(), margin.toFloat())
+                    c.clipRect(0f, 0f, width.toFloat(), avail.toFloat())
+                    c.translate(0f, -top.toFloat())
+                    layout.draw(c)
+                    c.restore()
+                    pdf.finishPage(page)
+
+                    line = end
+                    pageNum++
+                }
+                pdf.writeTo(os)
+            } finally {
+                pdf.close()
+            }
+        }
     }
 
     private fun merge(ctx: Context, uris: List<Uri>, out: String): String {
@@ -248,42 +356,46 @@ object PdfOps {
         }
     }
 
-    private fun textBitmap(text: String): Bitmap {
+    private fun textBitmap(text: String, colorInt: Int): Bitmap {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(110, 110, 110)
-            textSize = 160f
+            color = colorInt
+            textSize = 180f
             typeface = Typeface.DEFAULT_BOLD
             textAlign = Paint.Align.CENTER
         }
         var w = paint.measureText(text)
-        if (w > 3000f) {
-            paint.textSize = paint.textSize * 3000f / w
+        if (w > 3200f) {
+            paint.textSize = paint.textSize * 3200f / w
             w = paint.measureText(text)
         }
-        val bw = w.toInt() + 80
-        val bh = (paint.textSize * 1.6f).toInt()
+        val bw = max(100, w.toInt() + 80)
+        val bh = max(60, (paint.textSize * 1.6f).toInt())
         val bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
         val y = bh / 2f - (paint.ascent() + paint.descent()) / 2f
         Canvas(bmp).drawText(text, bw / 2f, y, paint)
         return bmp
     }
 
-    private fun watermark(ctx: Context, uri: Uri, text: String, out: String): String {
+    private fun watermark(ctx: Context, uri: Uri, text: String, opts: WatermarkOptions, out: String): String {
         open(ctx, uri).use { doc ->
-            val bmp = textBitmap(text)
+            val bmp = textBitmap(text, opts.colorInt)
             val img = LosslessFactory.createFromImage(doc, bmp)
             val gs = PDExtendedGraphicsState()
-            gs.nonStrokingAlphaConstant = 0.3f
+            gs.nonStrokingAlphaConstant = opts.alpha.coerceIn(0.05f, 1.0f)
+
+            // Scale width proportional to selected font size (16..110 -> 0.25..1.15 of page width)
+            val widthRatio = (opts.size / 65f).coerceIn(0.22f, 1.25f)
+
             for (page in doc.pages) {
                 val box = page.mediaBox
                 val w = box.width
                 val h = box.height
-                val tw = 0.75f * min(w, h)
+                val tw = widthRatio * min(w, h)
                 val th = tw * bmp.height / bmp.width
                 PDPageContentStream(doc, page, PDPageContentStream.AppendMode.APPEND, true, true).use { cs ->
                     cs.saveGraphicsState()
                     cs.setGraphicsStateParameters(gs)
-                    cs.transform(Matrix.getRotateInstance(Math.toRadians(45.0), w / 2f, h / 2f))
+                    cs.transform(Matrix.getRotateInstance(Math.toRadians(opts.angle.toDouble()), w / 2f, h / 2f))
                     cs.drawImage(img, -tw / 2f, -th / 2f, tw, th)
                     cs.restoreGraphicsState()
                 }
@@ -310,7 +422,6 @@ object PdfOps {
     }
 
     private fun compress(ctx: Context, uri: Uri, level: Int, out: String): String {
-        // level 0 = high quality, 1 = medium, 2 = maximum compression
         val (jpegQ, scale) = when (level) {
             0 -> 0.80f to 2.0f
             1 -> 0.65f to 1.5f
