@@ -16,6 +16,7 @@ jobs:
       - run: |
           mkdir -p app/src/main/java/com/example/pdftoolkit
           mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
 
           for f in MainActivity.kt PdfOps.kt Tool.kt Ui.kt Convert.kt; do
             if [ -f "$f" ]; then
@@ -31,20 +32,54 @@ jobs:
             mv "build.gradle.kts" "app/build.gradle.kts"
           fi
 
-          if [ ! -f "app/src/main/res/values/strings.xml" ]; then
-            cat << 'EOF' > app/src/main/res/values/strings.xml
+          # Set App Name to PDFix
+          cat << 'EOF' > app/src/main/res/values/strings.xml
           <resources>
-              <string name="app_name">PdfToolkit</string>
+              <string name="app_name">PDFix</string>
           </resources>
           EOF
-          fi
 
-          if [ ! -f "app/src/main/res/values/themes.xml" ]; then
-            cat << 'EOF' > app/src/main/res/values/themes.xml
+          cat << 'EOF' > app/src/main/res/values/themes.xml
           <resources>
               <style name="Theme.PdfToolkit" parent="android:Theme.Material.Light.NoActionBar" />
           </resources>
           EOF
+
+          # Create Custom Vector App Icon for PDFix
+          cat << 'EOF' > app/src/main/res/drawable/ic_launcher_pdfix.xml
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#D32F2F"
+                  android:pathData="M0,0h108v108h-108z"/>
+              <path
+                  android:fillColor="#B71C1C"
+                  android:pathData="M54,0h54v108h-54z"/>
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M30,22 L64,22 L78,36 L78,86 L30,86 Z"/>
+              <path
+                  android:fillColor="#FFCDD2"
+                  android:pathData="M64,22 L64,36 L78,36 Z"/>
+              <path
+                  android:fillColor="#D32F2F"
+                  android:pathData="M38,48 L70,48 L70,53 L38,53 Z M38,58 L70,58 L70,63 L38,63 Z M38,68 L58,68 L58,73 L38,73 Z"/>
+          </vector>
+          EOF
+
+          # Ensure AndroidManifest uses internet permission and custom icon
+          if [ -f "app/src/main/AndroidManifest.xml" ]; then
+            if ! grep -q "android.permission.INTERNET" app/src/main/AndroidManifest.xml; then
+              sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET" \/>\n    <application/' app/src/main/AndroidManifest.xml
+            fi
+            sed -i 's/android:icon="[^"]*"/android:icon="@drawable\/ic_launcher_pdfix"/g' app/src/main/AndroidManifest.xml
+            if ! grep -q "android:icon=" app/src/main/AndroidManifest.xml; then
+              sed -i 's/<application/<application android:icon="@drawable\/ic_launcher_pdfix"/' app/src/main/AndroidManifest.xml
+            fi
+            sed -i 's/android:label="[^"]*"/android:label="@string\/app_name"/g' app/src/main/AndroidManifest.xml
           fi
 
           if [ ! -f "settings.gradle.kts" ]; then
@@ -63,7 +98,7 @@ jobs:
                   mavenCentral()
               }
           }
-          rootProject.name = "PdfToolkit"
+          rootProject.name = "PDFix"
           include(":app")
           EOF
           fi
@@ -96,5 +131,5 @@ jobs:
           exit $EXIT_CODE
       - uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
+          name: PDFix-debug-apk
           path: app/build/outputs/apk/debug/*.apk
